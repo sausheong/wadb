@@ -1,0 +1,9 @@
+# Built binary
+/wadb
+
+# Local data
+/.wadb/
+
+# Go workspace
+/go.work
+/go.work.sum
