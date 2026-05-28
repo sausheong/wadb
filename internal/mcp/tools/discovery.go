@@ -24,10 +24,7 @@ func NewListChatsHandler(q *db.Queries) ToolHandler {
 		if kind != "" && kind != "dm" && kind != "group" {
 			return errResult("kind must be 'dm', 'group', or empty"), nil
 		}
-		limit := argInt(args, "limit", 50)
-		if limit <= 0 || limit > 500 {
-			limit = 50
-		}
+		limit := clampLimit(argInt(args, "limit", 50))
 		var beforeTs int64
 		var beforeID string
 		if c := argStr(args, "cursor"); c != "" {
@@ -72,7 +69,7 @@ func ListContactsTool() mcpgo.Tool {
 func NewListContactsHandler(q *db.Queries) ToolHandler {
 	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		args := req.GetArguments()
-		contacts, err := q.SearchContacts(ctx, argStr(args, "query"), argInt(args, "limit", 50))
+		contacts, err := q.SearchContacts(ctx, argStr(args, "query"), clampLimit(argInt(args, "limit", 50)))
 		if err != nil {
 			return errResult("list_contacts: " + err.Error()), nil
 		}
@@ -101,7 +98,7 @@ func ListGroupsTool() mcpgo.Tool {
 func NewListGroupsHandler(q *db.Queries) ToolHandler {
 	return func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 		args := req.GetArguments()
-		groups, err := q.SearchGroups(ctx, argStr(args, "query"), argInt(args, "limit", 50))
+		groups, err := q.SearchGroups(ctx, argStr(args, "query"), clampLimit(argInt(args, "limit", 50)))
 		if err != nil {
 			return errResult("list_groups: " + err.Error()), nil
 		}

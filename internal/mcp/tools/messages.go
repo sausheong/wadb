@@ -24,10 +24,7 @@ func NewGetMessagesHandler(q *db.Queries) ToolHandler {
 		if err := validateRequired(args, "chat_jid"); err != nil {
 			return errResult(err.Error()), nil
 		}
-		limit := argInt(args, "limit", 50)
-		if limit <= 0 || limit > 500 {
-			limit = 50
-		}
+		limit := clampLimit(argInt(args, "limit", 50))
 		var beforeTs int64
 		var beforeID string
 		if c := argStr(args, "cursor"); c != "" {
@@ -72,10 +69,7 @@ func NewSearchMessagesHandler(q *db.Queries) ToolHandler {
 		if err := validateRequired(args, "query"); err != nil {
 			return errResult(err.Error()), nil
 		}
-		limit := argInt(args, "limit", 50)
-		if limit <= 0 || limit > 500 {
-			limit = 50
-		}
+		limit := clampLimit(argInt(args, "limit", 50))
 		msgs, err := q.SearchMessages(ctx,
 			argStr(args, "query"),
 			argStr(args, "chat_jid"),

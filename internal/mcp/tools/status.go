@@ -116,3 +116,15 @@ func argInt64(args map[string]any, name string) int64 {
 	}
 	return 0
 }
+
+// clampLimit normalizes a caller-supplied limit value. Non-positive values
+// fall back to 50; values above 500 are clamped to 500.
+func clampLimit(limit int) int {
+	if limit <= 0 {
+		return 50
+	}
+	if limit > 500 {
+		return 500
+	}
+	return limit
+}
