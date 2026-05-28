@@ -9,68 +9,24 @@ import (
 
 	"github.com/sausheong/wadb/internal/db"
 	"github.com/sausheong/wadb/internal/waclient"
+	"github.com/sausheong/wadb/internal/waevent"
 )
 
-// Normalized events the handlers operate on. The translator (in waclient
-// package, Task 11) converts concrete whatsmeow types into these so tests
-// don't need to depend on whatsmeow.
+// Normalized events the handlers operate on. The canonical definitions
+// live in internal/waevent so the waclient translator can produce them
+// without creating an import cycle (ingest → waclient → ingest). These
+// type aliases keep existing handlers and tests unchanged.
 
-type TestMessage struct {
-	ChatJID, SenderJID, ID string
-	Text                   string
-	Timestamp              time.Time
-	Kind                   string // "" defaults to "text"
-	QuotedID               string
-	FromMe                 bool
-}
-
-type TestMedia struct {
-	ChatJID, SenderJID, ID string
-	Caption                string
-	Timestamp              time.Time
-	Kind                   string // "image"|"video"|"audio"|"voice"|"document"|"sticker"
-	MimeType               string
-	Size                   int64
-	Width, Height          int
-	DurationSec            int
-	DownloadRef            string
-	FromMe                 bool
-}
-
-type TestEdit struct {
-	ChatJID, ID string
-	NewText     string
-	EditedAt    time.Time
-}
-
-type TestDelete struct {
-	ChatJID, ID string
-	DeletedAt   time.Time
-}
-
-type TestReaction struct {
-	ChatJID, TargetID string
-	FromJID           string
-	Emoji             string // "" removes reaction from FromJID
-	Timestamp         time.Time
-}
-
-type TestContact struct {
-	JID, PushName, BusinessName, Phone string
-	UpdatedAt                          time.Time
-}
-
-type TestGroupInfo struct {
-	JID, Name, Topic, OwnerJID string
-	CreatedAt, UpdatedAt       time.Time
-	Participants               []TestGroupParticipant
-}
-
-type TestGroupParticipant struct {
-	JID      string
-	IsAdmin  bool
-	JoinedAt time.Time
-}
+type (
+	TestMessage          = waevent.TestMessage
+	TestMedia            = waevent.TestMedia
+	TestEdit             = waevent.TestEdit
+	TestDelete           = waevent.TestDelete
+	TestReaction         = waevent.TestReaction
+	TestContact          = waevent.TestContact
+	TestGroupInfo        = waevent.TestGroupInfo
+	TestGroupParticipant = waevent.TestGroupParticipant
+)
 
 // Ingester drains the WhatsApp event channel and writes to SQLite.
 // Single goroutine, single writer to the application DB.

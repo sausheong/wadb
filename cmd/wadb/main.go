@@ -36,5 +36,4 @@ Environment:
   WADB_LOG_LEVEL       debug|info|warn|error (default: info)`)
 }
 
-func runLink(args []string) int  { fmt.Fprintln(os.Stderr, "link: not implemented"); return 1 }
 func runServe(args []string) int { fmt.Fprintln(os.Stderr, "serve: not implemented"); return 1 }
