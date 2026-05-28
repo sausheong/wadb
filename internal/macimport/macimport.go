@@ -162,6 +162,16 @@ func (i *Importer) inPhase(ctx context.Context, phase string, fn func() error) e
 // --- per-table writers; stubs filled out in Task 5 ---
 
 func (i *Importer) importContacts(ctx context.Context) (int, error) {
+	// Build a JID -> latest push name map in a single scan. The previous
+	// per-contact "SELECT ... ORDER BY ZMESSAGEDATE DESC LIMIT 1" lookup
+	// scanned the full message-date index for every contact (~18K
+	// contacts × 117K rows = billions of row reads on a real DB). One
+	// GROUP BY pass over ZWAMESSAGE produces the same map in ~100 ms.
+	pushNames, err := i.loadLatestPushNames(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("load push names: %w", err)
+	}
+
 	rows, err := i.src.QueryContext(ctx, `
 SELECT DISTINCT jid FROM (
     SELECT ZFROMJID  AS jid FROM ZWAMESSAGE       WHERE ZFROMJID IS NOT NULL AND ZFROMJID <> ''
@@ -185,16 +195,9 @@ ORDER BY jid`)
 			i.log.Warn("scan contact", "err", err)
 			continue
 		}
-		// Best-effort push name from the most recent message we saw from this JID.
-		var pushName sql.NullString
-		_ = i.src.QueryRowContext(ctx, `
-SELECT ZPUSHNAME FROM ZWAMESSAGE
-WHERE ZFROMJID = ? AND ZPUSHNAME IS NOT NULL AND ZPUSHNAME <> ''
-ORDER BY ZMESSAGEDATE DESC LIMIT 1`, jid).Scan(&pushName)
-
 		if err := i.dst.UpsertContact(ctx, db.Contact{
 			JID:       jid,
-			PushName:  nullStringValue(pushName),
+			PushName:  pushNames[jid],
 			UpdatedAt: importedAt,
 		}); err != nil {
 			i.log.Warn("upsert contact", "jid", jid, "err", err)
@@ -203,6 +206,39 @@ ORDER BY ZMESSAGEDATE DESC LIMIT 1`, jid).Scan(&pushName)
 		n++
 	}
 	return n, rows.Err()
+}
+
+// loadLatestPushNames returns a JID -> latest non-empty push name map
+// built in one pass over ZWAMESSAGE. SQLite's "bare column with MAX"
+// idiom (MAX(date), corresponding push name) avoids both N+1 lookups
+// and a correlated subquery.
+func (i *Importer) loadLatestPushNames(ctx context.Context) (map[string]string, error) {
+	rows, err := i.src.QueryContext(ctx, `
+SELECT ZFROMJID, ZPUSHNAME
+FROM (
+    SELECT ZFROMJID, ZPUSHNAME, MAX(ZMESSAGEDATE) AS d
+    FROM ZWAMESSAGE
+    WHERE ZFROMJID IS NOT NULL
+      AND ZPUSHNAME IS NOT NULL
+      AND ZPUSHNAME <> ''
+    GROUP BY ZFROMJID
+)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string, 8192)
+	for rows.Next() {
+		var jid, name sql.NullString
+		if err := rows.Scan(&jid, &name); err != nil {
+			i.log.Warn("scan push name", "err", err)
+			continue
+		}
+		if jid.Valid && name.Valid {
+			out[jid.String] = name.String
+		}
+	}
+	return out, rows.Err()
 }
 
 func (i *Importer) importChats(ctx context.Context) (int, error) {
