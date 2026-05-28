@@ -14,7 +14,6 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
-	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/sausheong/wadb/internal/waevent"
@@ -30,7 +29,7 @@ type WhatsmeowClient struct {
 // returns a WhatsmeowClient. If no device is paired yet, DeviceJID() will
 // return "" and Connect will refuse — caller must run `wadb link` first.
 func NewWhatsmeow(ctx context.Context, sessionDBPath string) (*WhatsmeowClient, error) {
-	dbLog := waLog.Stdout("Database", "WARN", true)
+	dbLog := newSlogAdapter("whatsmeow/db")
 	// modernc.org/sqlite registers itself as "sqlite". dbutil.ParseDialect
 	// accepts any string starting with "sqlite" as the SQLite dialect.
 	dsn := "file:" + sessionDBPath + "?_pragma=foreign_keys(1)"
@@ -42,7 +41,7 @@ func NewWhatsmeow(ctx context.Context, sessionDBPath string) (*WhatsmeowClient, 
 	if err != nil {
 		return nil, fmt.Errorf("get device: %w", err)
 	}
-	cli := whatsmeow.NewClient(device, waLog.Stdout("Client", "INFO", true))
+	cli := whatsmeow.NewClient(device, newSlogAdapter("whatsmeow/client"))
 	return &WhatsmeowClient{cli: cli, container: container}, nil
 }
 
