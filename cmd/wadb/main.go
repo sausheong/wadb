@@ -35,5 +35,3 @@ Environment:
   WADB_HOME            Data directory (default: ~/.wadb)
   WADB_LOG_LEVEL       debug|info|warn|error (default: info)`)
 }
-
-func runServe(args []string) int { fmt.Fprintln(os.Stderr, "serve: not implemented"); return 1 }
