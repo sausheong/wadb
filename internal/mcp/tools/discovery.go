@@ -43,6 +43,7 @@ func NewListChatsHandler(q *db.Queries) ToolHandler {
 		for _, c := range chats {
 			out = append(out, map[string]any{
 				"jid":             c.JID,
+				"name":            chatDisplayName(ctx, q, c.JID, c.Kind),
 				"kind":            c.Kind,
 				"last_message_at": c.LastMessageAt,
 				"unread_count":    c.UnreadCount,
@@ -77,7 +78,7 @@ func NewListContactsHandler(q *db.Queries) ToolHandler {
 		for _, c := range contacts {
 			out = append(out, map[string]any{
 				"jid":           c.JID,
-				"push_name":     c.PushName,
+				"push_name":     cleanPushName(c.PushName),
 				"business_name": c.BusinessName,
 				"phone":         c.Phone,
 				"is_blocked":    c.IsBlocked,
@@ -85,6 +86,35 @@ func NewListContactsHandler(q *db.Queries) ToolHandler {
 		}
 		return jsonResult(map[string]any{"contacts": out}), nil
 	}
+}
+
+// cleanPushName is a defense-in-depth filter for strings that look like
+// serialized protobuf identity hints (base64-only blobs from anonymized
+// @lid JIDs) rather than human names. The importer already pulls names
+// from ZWAPROFILEPUSHNAME instead of the message ZPUSHNAME column, but
+// historical wadb.db rows from older imports may still have garbage.
+//
+// A real human name typically (a) contains a non-base64 character like
+// a space or accented letter, or (b) is short. We treat strings that
+// are 12+ characters AND consist only of base64-alphabet chars as
+// suspicious and return "". This passes "Alice", "Bob Barker",
+// "Sasidhar", "+65 9298 0156" while filtering "CKHGsMsGIAA=" and
+// longer protobuf-shaped strings.
+func cleanPushName(s string) string {
+	if len(s) < 12 {
+		return s
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '+' || r == '/' || r == '=':
+		default:
+			return s
+		}
+	}
+	return ""
 }
 
 func ListGroupsTool() mcpgo.Tool {
@@ -137,6 +167,7 @@ func NewGetChatHandler(q *db.Queries) ToolHandler {
 		}
 		out := map[string]any{
 			"jid":             chat.JID,
+			"name":            chatDisplayName(ctx, q, chat.JID, chat.Kind),
 			"kind":            chat.Kind,
 			"last_message_at": chat.LastMessageAt,
 			"unread_count":    chat.UnreadCount,
@@ -148,8 +179,10 @@ func NewGetChatHandler(q *db.Queries) ToolHandler {
 			parts, _ := q.GetGroupParticipants(ctx, jid)
 			pOut := make([]map[string]any, 0, len(parts))
 			for _, p := range parts {
+				pc, _ := q.GetContact(ctx, p.ContactJID)
 				pOut = append(pOut, map[string]any{
 					"jid":       p.ContactJID,
+					"name":      cleanPushName(pc.PushName),
 					"is_admin":  p.IsAdmin,
 					"joined_at": p.JoinedAt,
 				})
@@ -158,4 +191,24 @@ func NewGetChatHandler(q *db.Queries) ToolHandler {
 		}
 		return jsonResult(out), nil
 	}
+}
+
+// chatDisplayName returns the human-readable name for a chat:
+//   - group: groups.name (or "" if unknown)
+//   - dm:    contacts.push_name for that JID (or "" if unknown)
+// Errors are swallowed silently — name enrichment is best-effort and
+// must not fail the parent tool call.
+func chatDisplayName(ctx context.Context, q *db.Queries, jid, kind string) string {
+	if kind == "group" {
+		g, err := q.GetGroup(ctx, jid)
+		if err != nil {
+			return ""
+		}
+		return g.Name
+	}
+	c, err := q.GetContact(ctx, jid)
+	if err != nil {
+		return ""
+	}
+	return cleanPushName(c.PushName)
 }

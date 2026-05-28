@@ -189,6 +189,17 @@ WHERE excluded.updated_at >= groups.updated_at`,
 	return err
 }
 
+func (q *Queries) GetGroup(ctx context.Context, jid string) (Group, error) {
+	var g Group
+	var name, topic, owner sql.NullString
+	var created sql.NullInt64
+	err := q.db.QueryRowContext(ctx,
+		`SELECT jid, name, topic, owner_jid, created_at, updated_at FROM groups WHERE jid=?`, jid).
+		Scan(&g.JID, &name, &topic, &owner, &created, &g.UpdatedAt)
+	g.Name, g.Topic, g.OwnerJID, g.CreatedAt = name.String, topic.String, owner.String, created.Int64
+	return g, err
+}
+
 func (q *Queries) SearchGroups(ctx context.Context, query string, limit int) ([]Group, error) {
 	rows, err := q.db.QueryContext(ctx, `
 SELECT jid, name, topic, owner_jid, created_at, updated_at

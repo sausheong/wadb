@@ -208,30 +208,60 @@ ORDER BY jid`)
 	return n, rows.Err()
 }
 
-// loadLatestPushNames returns a JID -> latest non-empty push name map
-// built in one pass over ZWAMESSAGE. SQLite's "bare column with MAX"
-// idiom (MAX(date), corresponding push name) avoids both N+1 lookups
-// and a correlated subquery.
+// loadLatestPushNames returns a JID -> human push name map by combining
+// two source tables:
+//   - ZWAPROFILEPUSHNAME (authoritative human names, e.g. "Sasidhar")
+//   - ZWACHATSESSION.ZPARTNERNAME for DMs (e.g. "Yap Kathy", or a
+//     formatted phone like "+65 9298 0156" if no real name is known)
+//
+// ZWAMESSAGE.ZPUSHNAME is deliberately NOT used: on this schema version
+// it holds a serialized protobuf identity hint (e.g. "CKHGsMsGIAA="),
+// not a human name.
 func (i *Importer) loadLatestPushNames(ctx context.Context) (map[string]string, error) {
+	out := make(map[string]string, 8192)
+
+	// First pass: ZWACHATSESSION.ZPARTNERNAME (DM fallback / phone format).
 	rows, err := i.src.QueryContext(ctx, `
-SELECT ZFROMJID, ZPUSHNAME
-FROM (
-    SELECT ZFROMJID, ZPUSHNAME, MAX(ZMESSAGEDATE) AS d
-    FROM ZWAMESSAGE
-    WHERE ZFROMJID IS NOT NULL
-      AND ZPUSHNAME IS NOT NULL
-      AND ZPUSHNAME <> ''
-    GROUP BY ZFROMJID
-)`)
+SELECT ZCONTACTJID, ZPARTNERNAME
+FROM ZWACHATSESSION
+WHERE ZSESSIONTYPE = 0
+  AND ZCONTACTJID IS NOT NULL
+  AND ZPARTNERNAME IS NOT NULL
+  AND ZPARTNERNAME <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var jid, name sql.NullString
+		if err := rows.Scan(&jid, &name); err != nil {
+			i.log.Warn("scan partner name", "err", err)
+			continue
+		}
+		if jid.Valid && name.Valid {
+			out[jid.String] = name.String
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Second pass: ZWAPROFILEPUSHNAME (real push names). Overwrites the
+	// fallback when a real name exists.
+	rows, err = i.src.QueryContext(ctx, `
+SELECT ZJID, ZPUSHNAME
+FROM ZWAPROFILEPUSHNAME
+WHERE ZJID IS NOT NULL
+  AND ZPUSHNAME IS NOT NULL
+  AND ZPUSHNAME <> ''`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[string]string, 8192)
 	for rows.Next() {
 		var jid, name sql.NullString
 		if err := rows.Scan(&jid, &name); err != nil {
-			i.log.Warn("scan push name", "err", err)
+			i.log.Warn("scan profile push name", "err", err)
 			continue
 		}
 		if jid.Valid && name.Valid {
@@ -415,7 +445,7 @@ SELECT Z_PK, ZCONTACTJID FROM ZWACHATSESSION WHERE ZCONTACTJID IS NOT NULL`)
 		for {
 			rows, err := i.src.QueryContext(ctx, `
 SELECT m.Z_PK, m.ZSTANZAID, m.ZFROMJID, m.ZTOJID, m.ZISFROMME, m.ZMESSAGEDATE,
-       m.ZMESSAGETYPE, m.ZTEXT, m.ZPUSHNAME,
+       m.ZMESSAGETYPE, m.ZTEXT,
        parent.ZSTANZAID AS parent_stanza
 FROM ZWAMESSAGE m
 LEFT JOIN ZWAMESSAGE parent ON parent.Z_PK = m.ZPARENTMESSAGE
@@ -437,11 +467,10 @@ LIMIT ? OFFSET ?`, c.pk, pageSize, offset)
 					msgDate   sql.NullFloat64
 					msgType   sql.NullInt64
 					text      sql.NullString
-					pushName  sql.NullString
 					parentSID sql.NullString
 				)
 				if err := rows.Scan(&pk, &stanzaID, &fromJID, &toJID, &isFromMe,
-					&msgDate, &msgType, &text, &pushName, &parentSID); err != nil {
+					&msgDate, &msgType, &text, &parentSID); err != nil {
 					errCount++
 					i.log.Warn("scan message", "err", err)
 					continue
@@ -471,11 +500,17 @@ LIMIT ? OFFSET ?`, c.pk, pageSize, offset)
 					textPtr = &s
 				}
 
-				// Ensure sender contact exists.
+				// Ensure sender contact row exists (FK target). We pass
+				// PushName="" and UpdatedAt=1 (epoch +1s) so this loses
+				// the "newer wins" race against the clean
+				// ZWAPROFILEPUSHNAME upserts from importContacts. The
+				// contacts phase covers most senders via UNION, but
+				// system messages have NULL ZFROMJID and fall back to
+				// the chat JID, which may not be in contacts (e.g.
+				// group JIDs aren't contacts).
 				_ = i.dst.UpsertContact(ctx, db.Contact{
 					JID:       senderJID,
-					PushName:  nullStringValue(pushName),
-					UpdatedAt: nowUnix(),
+					UpdatedAt: 1,
 				})
 
 				if err := i.dst.InsertMessage(ctx, db.Message{

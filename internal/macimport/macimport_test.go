@@ -79,13 +79,27 @@ func TestImport_Contacts(t *testing.T) {
 	if stats.Contacts != 3 {
 		t.Errorf("Contacts = %d, want 3", stats.Contacts)
 	}
-	for _, jid := range []string{"111@s.whatsapp.net", "222@s.whatsapp.net", "333@s.whatsapp.net"} {
+	// Push name sources, in priority order:
+	//   111: profile name "Alice Anderson" wins over ZPARTNERNAME "Alice"
+	//   222: profile name "Bob Barker" wins over ZPARTNERNAME "Bob"
+	//   333: appears only as group participant, no profile name, no DM
+	//        partner name — push_name stays empty (NOT a base64 hint).
+	want := map[string]string{
+		"111@s.whatsapp.net": "Alice Anderson",
+		"222@s.whatsapp.net": "Bob Barker",
+		"333@s.whatsapp.net": "",
+	}
+	for jid, wantName := range want {
 		c, err := q.GetContact(context.Background(), jid)
 		if err != nil {
 			t.Errorf("missing contact %s: %v", jid, err)
+			continue
 		}
 		if c.JID != jid {
 			t.Errorf("contact JID = %q, want %q", c.JID, jid)
+		}
+		if c.PushName != wantName {
+			t.Errorf("contact %s push_name = %q, want %q", jid, c.PushName, wantName)
 		}
 	}
 }

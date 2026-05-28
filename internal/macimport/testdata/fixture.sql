@@ -28,3 +28,10 @@ VALUES
 
 INSERT INTO ZWAMEDIAITEM (Z_PK, ZMESSAGE, ZFILESIZE, ZMOVIEDURATION, ZMEDIALOCALPATH) VALUES
     (1, 3, 102400, 0, 'Message/Media/222@s.whatsapp.net/0/image-001.jpg');
+
+-- Profile push names: authoritative human names. 111 has a real name
+-- here that should win over the ZWACHATSESSION.ZPARTNERNAME fallback.
+-- 333 only appears as a group participant — no DM row, no profile name.
+INSERT INTO ZWAPROFILEPUSHNAME (Z_PK, ZJID, ZPUSHNAME) VALUES
+    (1, '111@s.whatsapp.net', 'Alice Anderson'),
+    (2, '222@s.whatsapp.net', 'Bob Barker');
