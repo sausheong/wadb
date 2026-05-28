@@ -45,9 +45,12 @@ type Importer struct {
 // New opens srcPath read-only and returns an Importer that writes through
 // dst. The caller owns dst; the Importer closes src on Close().
 func New(srcPath string, dst *db.Queries) (*Importer, error) {
-	// mode=ro + immutable=1 = we physically cannot write the source DB.
-	// Also avoids creating -wal/-shm sidecars next to the desktop app's.
-	dsn := fmt.Sprintf("file:%s?mode=ro&immutable=1", srcPath)
+	// mode=ro prevents us from writing the source DB. We deliberately do
+	// NOT set immutable=1 — the WhatsApp Desktop app may be running and
+	// writing to its own DB while we read. immutable=1 tells SQLite to
+	// skip WAL coordination, which causes "database disk image is
+	// malformed" when the desktop app commits a page during our read.
+	dsn := fmt.Sprintf("file:%s?mode=ro", srcPath)
 	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open source: %w", err)
@@ -73,50 +76,87 @@ func (i *Importer) Close() error {
 func (i *Importer) SetLogger(l *slog.Logger) { i.log = l }
 
 // Import runs the full pipeline in dependency order so FK constraints
-// hold. Each step writes through db.Queries and logs (but doesn't fail
-// the whole run on) per-row errors.
+// hold. Each step writes through db.Queries inside a single transaction
+// per step so 100K+ inserts pay one fsync rather than one per row.
+// Per-row errors are logged at warn and never fail the whole run.
 func (i *Importer) Import(ctx context.Context) (ImportStats, error) {
 	var stats ImportStats
 
-	// 1. Contacts — distinct senders + DM partners + group participants.
-	c, err := i.importContacts(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("contacts: %w", err)
-	}
-	stats.Contacts = c
+	// Pin the destination pool to a single connection for the duration
+	// of the import. db.Queries' methods all call q.db.ExecContext on
+	// whatever connection the pool hands out — without pinning to one
+	// conn, our explicit BEGIN runs on conn A while the writers fire on
+	// conns B/C/D and the BEGIN does nothing useful.
+	prevMaxConns := i.dst.DB().Stats().MaxOpenConnections
+	i.dst.DB().SetMaxOpenConns(1)
+	defer i.dst.DB().SetMaxOpenConns(prevMaxConns)
 
-	// 2. Chats — every ZWACHATSESSION row.
-	n, err := i.importChats(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("chats: %w", err)
+	if err := i.inPhase(ctx, "contacts", func() error {
+		c, err := i.importContacts(ctx)
+		stats.Contacts = c
+		return err
+	}); err != nil {
+		return stats, err
 	}
-	stats.Chats = n
 
-	// 3. Groups + participants — only for ZSESSIONTYPE=1.
+	if err := i.inPhase(ctx, "chats", func() error {
+		n, err := i.importChats(ctx)
+		stats.Chats = n
+		return err
+	}); err != nil {
+		return stats, err
+	}
+
+	// Groups phase deliberately runs WITHOUT an outer tx because
+	// db.Queries.SetGroupParticipants opens its own transaction
+	// (delete-then-insert) and SQLite doesn't allow nested BEGINs.
+	// Participant counts per group are small (tens) so the per-group
+	// tx is fine.
 	g, p, err := i.importGroupsAndParticipants(ctx)
+	stats.Groups = g
+	stats.Participants = p
 	if err != nil {
 		return stats, fmt.Errorf("groups: %w", err)
 	}
-	stats.Groups = g
-	stats.Participants = p
 
-	// 4. Messages — the bulk.
-	m, skipped, errCount, err := i.importMessages(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("messages: %w", err)
+	if err := i.inPhase(ctx, "messages", func() error {
+		m, skipped, errCount, err := i.importMessages(ctx)
+		stats.Messages = m
+		stats.SkippedMessages = skipped
+		stats.Errors += errCount
+		return err
+	}); err != nil {
+		return stats, err
 	}
-	stats.Messages = m
-	stats.SkippedMessages = skipped
-	stats.Errors += errCount
 
-	// 5. Media — only for messages we successfully wrote.
-	md, err := i.importMedia(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("media: %w", err)
+	if err := i.inPhase(ctx, "media", func() error {
+		md, err := i.importMedia(ctx)
+		stats.Media = md
+		return err
+	}); err != nil {
+		return stats, err
 	}
-	stats.Media = md
 
 	return stats, nil
+}
+
+// inPhase wraps fn in an explicit BEGIN/COMMIT against the destination DB
+// so the bulk inserts inside fn commit as one transaction (one fsync).
+// Relies on Import having already pinned MaxOpenConns=1 so subsequent
+// writes from db.Queries land on the same connection as our BEGIN.
+func (i *Importer) inPhase(ctx context.Context, phase string, fn func() error) error {
+	dst := i.dst.DB()
+	if _, err := dst.ExecContext(ctx, "BEGIN"); err != nil {
+		return fmt.Errorf("%s: begin: %w", phase, err)
+	}
+	if err := fn(); err != nil {
+		_, _ = dst.ExecContext(ctx, "ROLLBACK")
+		return fmt.Errorf("%s: %w", phase, err)
+	}
+	if _, err := dst.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("%s: commit: %w", phase, err)
+	}
+	return nil
 }
 
 // --- per-table writers; stubs filled out in Task 5 ---
