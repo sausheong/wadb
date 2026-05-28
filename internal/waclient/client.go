@@ -4,6 +4,7 @@ package waclient
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -12,6 +13,11 @@ import (
 // want to leak that dependency into every package that handles events.
 // The ingester does a type switch.
 type Event any
+
+// ErrNotConnected is the sentinel returned by Client methods when the
+// underlying socket is not connected. isRetryable in the MCP tools package
+// detects it via errors.Is so the LLM knows the call can be retried.
+var ErrNotConnected = errors.New("not connected")
 
 // SendResult is what every successful send returns.
 type SendResult struct {

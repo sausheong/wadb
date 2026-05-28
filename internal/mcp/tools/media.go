@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -29,7 +30,7 @@ func NewDownloadMediaHandler(q *db.Queries, c waclient.Client, cache *media.Cach
 		msgID := argStr(args, "message_id")
 		m, err := q.MediaForMessage(ctx, chatJID, msgID)
 		if err == sql.ErrNoRows {
-			return errResult("no media for that message"), nil
+			return waErrResult(errors.New("no media for that message")), nil
 		}
 		if err != nil {
 			return errResult("media lookup: " + err.Error()), nil

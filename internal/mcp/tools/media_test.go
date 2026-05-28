@@ -81,3 +81,28 @@ func TestDownloadMedia_FetchAndCache(t *testing.T) {
 		t.Errorf("downloader was called %d times on cached path", called)
 	}
 }
+
+func TestDownloadMedia_NoMediaRow_IsRetryableEnvelope(t *testing.T) {
+	q := seedDB(t)
+	ctx := context.Background()
+	fake := waclient.NewFake()
+	cache := media.NewCache(filepath.Join(t.TempDir(), "media"))
+	h := NewDownloadMediaHandler(q, fake, cache)
+	res, _ := h(ctx, callReq(map[string]any{"chat_jid": "x@s.whatsapp.net", "message_id": "M1"}))
+	if !res.IsError {
+		t.Fatal("expected error")
+	}
+	var got struct {
+		Error     string `json:"error"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.Unmarshal([]byte(firstTextContent(t, res)), &got); err != nil {
+		t.Fatalf("envelope not JSON: %v", err)
+	}
+	if got.Error == "" {
+		t.Error("error field empty")
+	}
+	if got.Retryable {
+		t.Error("no-media-row should not be retryable")
+	}
+}

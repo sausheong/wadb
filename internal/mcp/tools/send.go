@@ -154,10 +154,8 @@ func isRetryable(err error) bool {
 			return true
 		}
 	}
-	return errors.Is(err, errNotConnectedSentinel)
+	return errors.Is(err, waclient.ErrNotConnected)
 }
-
-var errNotConnectedSentinel = errors.New("not connected")
 
 // --- mime inference ---
 
