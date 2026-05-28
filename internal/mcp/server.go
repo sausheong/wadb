@@ -47,3 +47,6 @@ func New(q *db.Queries, c waclient.Client, ing *ingest.Ingester, mediaDir string
 func (s *Server) Serve(ctx context.Context) error {
 	return server.ServeStdio(s.srv)
 }
+
+// Underlying returns the wrapped *server.MCPServer for in-process tests.
+func (s *Server) Underlying() *server.MCPServer { return s.srv }
