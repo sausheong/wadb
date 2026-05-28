@@ -39,16 +39,25 @@ func TestOpenAndMigrate_AppliesAllMigrations(t *testing.T) {
 
 func TestMigrate_Idempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
-	conn, _ := Open(path)
+	conn, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
 	defer conn.Close()
 	if err := Migrate(context.Background(), conn); err != nil {
 		t.Fatalf("first migrate: %v", err)
 	}
-	v1, _ := SchemaVersion(context.Background(), conn)
+	v1, err := SchemaVersion(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("first SchemaVersion: %v", err)
+	}
 	if err := Migrate(context.Background(), conn); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
-	v2, _ := SchemaVersion(context.Background(), conn)
+	v2, err := SchemaVersion(context.Background(), conn)
+	if err != nil {
+		t.Fatalf("second SchemaVersion: %v", err)
+	}
 	if v1 != v2 {
 		t.Errorf("schema version changed on idempotent migrate: %d -> %d", v1, v2)
 	}
@@ -56,7 +65,10 @@ func TestMigrate_Idempotent(t *testing.T) {
 
 func TestOpen_EnablesWAL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
-	conn, _ := Open(path)
+	conn, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
 	defer conn.Close()
 	var mode string
 	if err := conn.QueryRowContext(context.Background(), `PRAGMA journal_mode`).Scan(&mode); err != nil {

@@ -76,14 +76,19 @@ func Migrate(ctx context.Context, conn *sql.DB) error {
 
 // SchemaVersion returns the highest applied migration version, or 0 if none.
 func SchemaVersion(ctx context.Context, conn *sql.DB) (int, error) {
-	var v sql.NullInt64
-	err := conn.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_version`).Scan(&v)
+	var name string
+	err := conn.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'`).Scan(&name)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
 	if err != nil {
-		// schema_version may not exist on a brand-new DB before Migrate creates it.
-		if strings.Contains(err.Error(), "no such table") {
-			return 0, nil
-		}
-		return 0, err
+		return 0, fmt.Errorf("check schema_version table: %w", err)
+	}
+	var v sql.NullInt64
+	if err := conn.QueryRowContext(ctx,
+		`SELECT MAX(version) FROM schema_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("read schema_version: %w", err)
 	}
 	if !v.Valid {
 		return 0, nil

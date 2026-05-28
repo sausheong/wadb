@@ -18,6 +18,7 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("sql.Open: %w", err)
 	}
 	if err := conn.PingContext(context.Background()); err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
 	// The ingester is the sole writer; readers can be many. A small pool is fine.
