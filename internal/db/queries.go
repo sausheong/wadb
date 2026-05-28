@@ -292,6 +292,29 @@ WHERE jid = ?`, m.Timestamp, m.ChatJID)
 	return err
 }
 
+// InsertMessageFillNulls is for the macimport phase-2 backfill. Unlike
+// InsertMessage (INSERT OR IGNORE — live ingester wins on conflict),
+// this variant fills NULL fields on an existing row from the incoming
+// message. Specifically: text/quoted_id are COALESCE'd so a prior
+// failed-import row with NULL text gets its text populated when the
+// historical source has it. Non-NULL existing values are preserved.
+// Useful when an earlier import crashed mid-run leaving partial rows.
+func (q *Queries) InsertMessageFillNulls(ctx context.Context, m Message) error {
+	_, err := q.db.ExecContext(ctx, `
+INSERT INTO messages
+  (id, chat_jid, sender_jid, from_me, timestamp, kind, text, quoted_id, reactions, edited_at, deleted_at, raw)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(chat_jid, id) DO UPDATE SET
+  text     = COALESCE(messages.text, excluded.text),
+  quoted_id = COALESCE(messages.quoted_id, excluded.quoted_id),
+  kind     = CASE WHEN messages.kind='system' AND excluded.kind<>'system'
+                  THEN excluded.kind ELSE messages.kind END`,
+		m.ID, m.ChatJID, m.SenderJID, m.FromMe, m.Timestamp, m.Kind,
+		nullStrPtr(m.Text), nullStr(m.QuotedID), nullStr(m.Reactions),
+		nullInt(m.EditedAt), nullInt(m.DeletedAt), nullStr(m.Raw))
+	return err
+}
+
 func (q *Queries) UpdateMessageEdited(ctx context.Context, chatJID, id string, newText string, editedAt int64) error {
 	_, err := q.db.ExecContext(ctx,
 		`UPDATE messages SET text=?, edited_at=? WHERE chat_jid=? AND id=?`,

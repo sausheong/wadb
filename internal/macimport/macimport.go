@@ -513,7 +513,7 @@ LIMIT ? OFFSET ?`, c.pk, pageSize, offset)
 					UpdatedAt: 1,
 				})
 
-				if err := i.dst.InsertMessage(ctx, db.Message{
+				if err := i.dst.InsertMessageFillNulls(ctx, db.Message{
 					ID:        stanzaID.String,
 					ChatJID:   c.jid,
 					SenderJID: senderJID,
