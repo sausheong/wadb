@@ -7,13 +7,14 @@ import (
 )
 
 func TestLoad_DefaultsToHomeWadb(t *testing.T) {
+	fakeHome := t.TempDir()
 	t.Setenv("WADB_HOME", "")
-	t.Setenv("HOME", "/tmp/fakehome")
+	t.Setenv("HOME", fakeHome)
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := "/tmp/fakehome/.wadb"
+	want := filepath.Join(fakeHome, ".wadb")
 	if c.Home != want {
 		t.Errorf("Home = %q, want %q", c.Home, want)
 	}
@@ -55,7 +56,10 @@ func TestLoad_CreatesHomeDirectory(t *testing.T) {
 func TestLoad_LogLevelDefaultInfo(t *testing.T) {
 	t.Setenv("WADB_LOG_LEVEL", "")
 	t.Setenv("WADB_HOME", t.TempDir())
-	c, _ := Load()
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if c.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want info", c.LogLevel)
 	}
@@ -64,8 +68,29 @@ func TestLoad_LogLevelDefaultInfo(t *testing.T) {
 func TestLoad_LogLevelRespected(t *testing.T) {
 	t.Setenv("WADB_LOG_LEVEL", "debug")
 	t.Setenv("WADB_HOME", t.TempDir())
-	c, _ := Load()
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	if c.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q, want debug", c.LogLevel)
+	}
+}
+
+func TestLoad_HomeAndMediaDirsAre0700(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("WADB_HOME", dir)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, p := range []string{c.Home, c.MediaDir} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o700 {
+			t.Errorf("%s perm = %o, want 0700", p, mode)
+		}
 	}
 }
