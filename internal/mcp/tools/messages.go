@@ -40,7 +40,7 @@ func NewGetMessagesHandler(q *db.Queries) ToolHandler {
 		}
 		out := make([]map[string]any, 0, len(msgs))
 		for _, m := range msgs {
-			out = append(out, messageToMap(m))
+			out = append(out, messageToMap(ctx, q, m))
 		}
 		var next string
 		if len(msgs) == limit {
@@ -82,7 +82,7 @@ func NewSearchMessagesHandler(q *db.Queries) ToolHandler {
 		}
 		out := make([]map[string]any, 0, len(msgs))
 		for _, m := range msgs {
-			out = append(out, messageToMap(m))
+			out = append(out, messageToMap(ctx, q, m))
 		}
 		return jsonResult(map[string]any{"messages": out}), nil
 	}
@@ -111,10 +111,10 @@ func NewGetMessageHandler(q *db.Queries) ToolHandler {
 		if err != nil {
 			return errResult("get_message: " + err.Error()), nil
 		}
-		out := messageToMap(m)
+		out := messageToMap(ctx, q, m)
 		if m.QuotedID != "" {
 			if qm, err := q.GetMessage(ctx, chatJID, m.QuotedID); err == nil {
-				out["quoted"] = messageToMap(qm)
+				out["quoted"] = messageToMap(ctx, q, qm)
 			}
 		}
 		if media, err := q.MediaForMessage(ctx, chatJID, id); err == nil {
@@ -132,7 +132,7 @@ func NewGetMessageHandler(q *db.Queries) ToolHandler {
 	}
 }
 
-func messageToMap(m db.Message) map[string]any {
+func messageToMap(ctx context.Context, q *db.Queries, m db.Message) map[string]any {
 	var text any
 	if m.Text != nil {
 		text = *m.Text
@@ -143,17 +143,78 @@ func messageToMap(m db.Message) map[string]any {
 		_ = json.Unmarshal([]byte(m.Reactions), &arr)
 		reactions = arr
 	}
+	senderName := ""
+	if m.FromMe {
+		senderName = "You"
+	} else {
+		senderName = lookupContactName(ctx, q, m.SenderJID)
+	}
 	return map[string]any{
-		"id":         m.ID,
-		"chat_jid":   m.ChatJID,
-		"sender_jid": m.SenderJID,
-		"from_me":    m.FromMe,
-		"timestamp":  m.Timestamp,
-		"kind":       m.Kind,
-		"text":       text,
-		"quoted_id":  m.QuotedID,
-		"reactions":  reactions,
-		"edited_at":  m.EditedAt,
+		"id":          m.ID,
+		"chat_jid":    m.ChatJID,
+		"sender_jid":  m.SenderJID,
+		"sender_name": senderName,
+		"from_me":     m.FromMe,
+		"timestamp":   m.Timestamp,
+		"kind":        m.Kind,
+		"text":        text,
+		"quoted_id":   m.QuotedID,
+		"reactions":   reactions,
+		"edited_at":   m.EditedAt,
 		"deleted_at": m.DeletedAt,
 	}
+}
+
+// lookupContactName resolves a sender JID to its push name. WhatsApp's
+// @lid (Linked Identity) JIDs come in two shapes:
+//   - base form:    "236592602042491@lid"
+//   - device form:  "236592602042491:64@lid"  (per-device, used by senders)
+// Only the base form appears in ZWAPROFILEPUSHNAME, so strip the
+// :NN device suffix before lookup. Best-effort: returns "" on miss.
+func lookupContactName(ctx context.Context, q *db.Queries, jid string) string {
+	if jid == "" {
+		return ""
+	}
+	candidates := []string{jid, stripDeviceSuffix(jid)}
+	for _, j := range candidates {
+		if j == "" {
+			continue
+		}
+		c, err := q.GetContact(ctx, j)
+		if err == nil {
+			if name := cleanPushName(c.PushName); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// stripDeviceSuffix removes a ":NN" device segment between the local
+// part and the @ in a WhatsApp JID. "236592602042491:64@lid" becomes
+// "236592602042491@lid". Returns "" if the JID has no @ or no suffix
+// to strip (caller will fall back to the original JID).
+func stripDeviceSuffix(jid string) string {
+	at := -1
+	for i := len(jid) - 1; i >= 0; i-- {
+		if jid[i] == '@' {
+			at = i
+			break
+		}
+	}
+	if at <= 0 {
+		return ""
+	}
+	local := jid[:at]
+	colon := -1
+	for i := 0; i < len(local); i++ {
+		if local[i] == ':' {
+			colon = i
+			break
+		}
+	}
+	if colon < 0 {
+		return ""
+	}
+	return local[:colon] + jid[at:]
 }
