@@ -1,4 +1,4 @@
-package mcp
+package cursor
 
 import "testing"
 
@@ -8,7 +8,7 @@ func TestCursor_RoundTrip(t *testing.T) {
 	if enc == "" {
 		t.Fatal("encoded empty")
 	}
-	got, err := DecodeCursor(enc)
+	got, err := Decode(enc)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -17,8 +17,8 @@ func TestCursor_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestDecodeCursor_EmptyReturnsZeroNoError(t *testing.T) {
-	got, err := DecodeCursor("")
+func TestDecode_EmptyReturnsZeroNoError(t *testing.T) {
+	got, err := Decode("")
 	if err != nil {
 		t.Errorf("empty cursor returned error: %v", err)
 	}
@@ -27,8 +27,8 @@ func TestDecodeCursor_EmptyReturnsZeroNoError(t *testing.T) {
 	}
 }
 
-func TestDecodeCursor_GarbageReturnsError(t *testing.T) {
-	if _, err := DecodeCursor("not-base64!!"); err == nil {
+func TestDecode_GarbageReturnsError(t *testing.T) {
+	if _, err := Decode("not-base64!!"); err == nil {
 		t.Error("expected error for invalid cursor")
 	}
 }

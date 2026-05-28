@@ -1,7 +1,5 @@
-// Package mcp wires the Model Context Protocol server for wadb.
-//
-// This file contains the opaque pagination cursor used by read tools.
-package mcp
+// Package cursor implements the opaque pagination cursor used by MCP read tools.
+package cursor
 
 import (
 	"encoding/base64"
@@ -25,7 +23,7 @@ func (c Cursor) Encode() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func DecodeCursor(s string) (Cursor, error) {
+func Decode(s string) (Cursor, error) {
 	if s == "" {
 		return Cursor{}, nil
 	}
