@@ -126,3 +126,81 @@ func TestGetMessages_PaginatesByCursor(t *testing.T) {
 		t.Errorf("page2 = %+v", page2)
 	}
 }
+
+func TestUpsertChat_DoesNotClobberFlags(t *testing.T) {
+	q := newTestDB(t)
+	ctx := context.Background()
+	if err := q.UpsertChat(ctx, Chat{JID: "c@s.whatsapp.net", Kind: "dm", LastMessageAt: 100}); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	if err := q.UpdateChatFlags(ctx, "c@s.whatsapp.net", true, true, 9999); err != nil {
+		t.Fatalf("update flags: %v", err)
+	}
+	// Ingester-style upsert with a newer message — must NOT reset flags.
+	if err := q.UpsertChat(ctx, Chat{JID: "c@s.whatsapp.net", Kind: "dm", LastMessageAt: 200}); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	got, err := q.GetChat(ctx, "c@s.whatsapp.net")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !got.Archived || !got.Pinned {
+		t.Errorf("flags clobbered: archived=%v pinned=%v", got.Archived, got.Pinned)
+	}
+	if got.MutedUntil != 9999 {
+		t.Errorf("muted_until clobbered: %d", got.MutedUntil)
+	}
+	if got.LastMessageAt != 200 {
+		t.Errorf("last_message_at not bumped: %d", got.LastMessageAt)
+	}
+}
+
+func TestUpsertChat_BumpsLastMessageAtTakingMax(t *testing.T) {
+	q := newTestDB(t)
+	ctx := context.Background()
+	if err := q.UpsertChat(ctx, Chat{JID: "c@s.whatsapp.net", Kind: "dm", LastMessageAt: 200}); err != nil {
+		t.Fatal(err)
+	}
+	// An out-of-order event arrives with an OLDER timestamp.
+	if err := q.UpsertChat(ctx, Chat{JID: "c@s.whatsapp.net", Kind: "dm", LastMessageAt: 100}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := q.GetChat(ctx, "c@s.whatsapp.net")
+	if got.LastMessageAt != 200 {
+		t.Errorf("LastMessageAt = %d, want 200 (MAX of 200, 100)", got.LastMessageAt)
+	}
+}
+
+func TestSearchMessages_StableOrderOnTiedTimestamp(t *testing.T) {
+	q := newTestDB(t)
+	ctx := context.Background()
+	if err := q.UpsertContact(ctx, Contact{JID: "s@s.whatsapp.net", UpdatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.UpsertChat(ctx, Chat{JID: "s@s.whatsapp.net", Kind: "dm"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"A", "B", "C"} {
+		txt := "shared word " + id
+		if err := q.InsertMessage(ctx, Message{
+			ID: id, ChatJID: "s@s.whatsapp.net", SenderJID: "s@s.whatsapp.net",
+			Timestamp: 5000, Kind: "text", Text: &txt,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hits, err := q.SearchMessages(ctx, "shared", "", "", 0, 0, 10)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != 3 {
+		t.Fatalf("got %d hits", len(hits))
+	}
+	// With ties on timestamp, secondary sort by id DESC → C, B, A.
+	want := []string{"C", "B", "A"}
+	for i, h := range hits {
+		if h.ID != want[i] {
+			t.Errorf("hits[%d] = %q, want %q", i, h.ID, want[i])
+		}
+	}
+}

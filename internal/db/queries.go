@@ -116,16 +116,27 @@ LIMIT ?`, query, "%"+query+"%", "%"+query+"%", "%"+query+"%", limit)
 
 // --- Chats ---
 
+// UpsertChat inserts a new chat row or bumps last_message_at on an existing one.
+// Flag fields (archived, pinned, muted_until, unread_count) are NOT overwritten
+// on conflict — use UpdateChatFlags for that. This is what the ingester wants:
+// it sees a new message and shouldn't unarchive/unpin a chat as a side effect.
 func (q *Queries) UpsertChat(ctx context.Context, c Chat) error {
 	_, err := q.db.ExecContext(ctx, `
 INSERT INTO chats (jid, kind, last_message_at, unread_count, archived, pinned, muted_until)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(jid) DO UPDATE SET
   last_message_at = MAX(IFNULL(chats.last_message_at,0), IFNULL(excluded.last_message_at,0)),
-  archived        = excluded.archived,
-  pinned          = excluded.pinned,
-  muted_until     = excluded.muted_until`,
+  kind            = excluded.kind`,
 		c.JID, c.Kind, nullInt(c.LastMessageAt), c.UnreadCount, c.Archived, c.Pinned, nullInt(c.MutedUntil))
+	return err
+}
+
+// UpdateChatFlags overwrites the user-facing chat flags. Use this when an
+// explicit Archive/Pin/Mute event arrives — not on every inbound message.
+func (q *Queries) UpdateChatFlags(ctx context.Context, jid string, archived, pinned bool, mutedUntil int64) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE chats SET archived=?, pinned=?, muted_until=? WHERE jid=?`,
+		archived, pinned, nullInt(mutedUntil), jid)
 	return err
 }
 
@@ -336,7 +347,7 @@ WHERE f.text MATCH ?
   AND (? = '' OR m.sender_jid = ?)
   AND (? = 0  OR m.timestamp >= ?)
   AND (? = 0  OR m.timestamp <= ?)
-ORDER BY m.timestamp DESC
+ORDER BY m.timestamp DESC, m.id DESC
 LIMIT ?`, query, chatJID, chatJID, senderJID, senderJID, since, since, until, until, limit)
 	if err != nil {
 		return nil, err
