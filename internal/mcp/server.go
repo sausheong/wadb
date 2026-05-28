@@ -24,6 +24,13 @@ func New(q *db.Queries, c waclient.Client, ing *ingest.Ingester, log *slog.Logge
 		server.WithLogging(),
 	)
 	s.AddTool(tools.StatusTool(), server.ToolHandlerFunc(tools.NewStatusHandler(q, c, ing)))
+	s.AddTool(tools.ListChatsTool(), server.ToolHandlerFunc(tools.NewListChatsHandler(q)))
+	s.AddTool(tools.ListContactsTool(), server.ToolHandlerFunc(tools.NewListContactsHandler(q)))
+	s.AddTool(tools.ListGroupsTool(), server.ToolHandlerFunc(tools.NewListGroupsHandler(q)))
+	s.AddTool(tools.GetChatTool(), server.ToolHandlerFunc(tools.NewGetChatHandler(q)))
+	s.AddTool(tools.GetMessagesTool(), server.ToolHandlerFunc(tools.NewGetMessagesHandler(q)))
+	s.AddTool(tools.SearchMessagesTool(), server.ToolHandlerFunc(tools.NewSearchMessagesHandler(q)))
+	s.AddTool(tools.GetMessageTool(), server.ToolHandlerFunc(tools.NewGetMessageHandler(q)))
 	return &Server{srv: s, log: log}
 }
 
