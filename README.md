@@ -4,8 +4,6 @@
 
 Single Go binary. No background server. No cloud. Your data stays on disk under `~/.wadb/`.
 
-See [`docs/superpowers/specs/2026-05-28-wadb-design.md`](docs/superpowers/specs/2026-05-28-wadb-design.md) for the full design and the rationale behind the boundaries.
-
 ## Status
 
 v1. Hermetic test suite (42 tests) passes. The link / send / receive / search / download paths work against real WhatsApp. See [Known limitations](#known-limitations) for what's deferred.
@@ -138,55 +136,250 @@ The home directory contains:
   media/        # downloaded media blobs, sha256-named
 ```
 
-## Architecture
+## Design
 
-Single Go process. Three concurrent components share the address space:
+### Process model
 
-1. **WhatsApp client** (`whatsmeow.Client`) — owns the socket and session, emits events.
-2. **Event ingester** — single goroutine, drains the events channel, writes to SQLite. **Sole writer to `wadb.db`** (except for `download_media`'s targeted UPDATE on its own media row).
-3. **MCP server** (`mark3labs/mcp-go`) — stdio JSON-RPC, exposes the 13 tools. Read tools query SQLite directly (WAL allows many concurrent readers); send / download tools call into the WhatsApp client.
+`wadb` is one OS process holding three cooperating components in the same address space, and one SQLite file they all coordinate around.
 
 ```
-                      +-----------------+
-                      |  WhatsApp Web   |
-                      +--------+--------+
-                               |
-                               | whatsmeow socket
-                               v
-   +------+   stdio MCP   +----+-----+         +----------+
-   | LLM  |<------------->|  wadb    | events  | SQLite   |
-   +------+   JSON-RPC    |  serve   |-------->| wadb.db  |
-                          +----+-----+ ingest  +----------+
-                               |                     ^
-                               | read tools          |
-                               +---------------------+
+                       +---------------------+
+                       |   WhatsApp Web      |
+                       +----------+----------+
+                                  |
+                                  | whatsmeow socket (TLS)
+                                  v
+   +-------+   stdio JSON-RPC  +-----------------------------+
+   |  LLM  |<----------------->|  wadb serve  (one process)  |
+   +-------+    MCP protocol   |                             |
+                               |  +-----------------------+  |
+                               |  |  waclient.Client      |  |
+                               |  |  (whatsmeow wrapper)  |  |
+                               |  +----------+------------+  |
+                               |             | events ch     |
+                               |             v               |
+                               |  +-----------------------+  |
+                               |  |  ingest.Ingester      |  |
+                               |  |  (single goroutine,   |  |
+                               |  |   only writer)        |  |
+                               |  +----------+------------+  |
+                               |             | writes        |
+                               |             v               |
+                               |  +-----------------------+  |
+                               |  |  db.Queries (SQLite,  |  |
+                               |  |  WAL, FTS5)           |  |
+                               |  +-----------------------+  |
+                               |             ^               |
+                               |             | read tools    |
+                               |  +----------+------------+  |
+                               |  |  mcp/tools (13 tools) |  |
+                               |  +-----------------------+  |
+                               +-----------------------------+
 ```
 
-**Why this shape:**
+The three components:
 
-- Single process means no IPC and the WhatsApp socket stays warm.
-- The ingester being the sole writer lets the MCP server read with no coordination — WAL mode handles the rest.
-- Tool handlers never touch the network (with one exception): cheap, fast, and Claude can ask for a chat's history without you paying a round trip.
-- Stdout is reserved for MCP JSON-RPC. Logs go to stderr. The whatsmeow library's logger is routed through `log/slog` via an adapter for the same reason — one stray write breaks the protocol.
+1. **`waclient.Client`** wraps `whatsmeow.Client`. Owns the WhatsApp Web socket, holds session keys in `session.db`, exposes a normalized `Events(ctx) <-chan waevent.Event` channel and a send/download API. There's also a `waclient.Fake` for hermetic tests that drives synthetic events without going through whatsmeow.
+2. **`ingest.Ingester`** runs one goroutine that drains the events channel and translates events into SQL writes. It is the **sole writer to `wadb.db`** — the `download_media` tool is the only other writer, and only ever updates its own media row. This means no in-process write coordination: the ingester doesn't even take a lock around its work, and read-side tool handlers don't compete for write locks.
+3. **`mcp.Server`** is the stdio MCP transport (`mark3labs/mcp-go`). It registers the 13 tools and serves JSON-RPC on stdin/stdout. Read-side tools open `q.db.QueryContext` directly — no fan-out into the WhatsApp client. Send-side and `download_media` call back into `waclient.Client`.
+
+A separate read-only path:
+
+- **`macimport.Importer`** is what `wadb import-history` runs. It reads the macOS WhatsApp Desktop SQLite (`ChatStorage.sqlite`) with `mode=ro`, translates the Core Data schema (`Z_`-prefixed tables, Core-Data-epoch timestamps) into `wadb.db`'s schema, and exits. Independent of `serve`; not part of the long-running process.
+
+### Why this shape
+
+- **Single process, no IPC.** The WhatsApp socket stays warm and the LLM sees no startup latency on each tool call. Restarting the binary is the only way the socket goes down; whatsmeow handles catch-up automatically on reconnect.
+- **One writer + WAL mode = no in-process locking.** SQLite's WAL allows many concurrent readers while a single writer is active. Because only the ingester writes the bulk tables, read tools never block and never see partial state.
+- **Read-side tools never touch the network.** A tool call for "list my 50 most recent chats" is a single indexed SQLite query — sub-millisecond, with no WhatsApp round trip. This matters because LLM agents will fire dozens of these in a planning loop.
+- **Stdout is sacred.** Stdout is reserved for MCP JSON-RPC frames. All logging — including the whatsmeow library's own logs — goes to stderr via a `log/slog` adapter (`internal/waclient/slog_log.go`). One stray `fmt.Println` to stdout corrupts the protocol and the MCP client disconnects.
+
+### Data model
+
+`wadb.db` is a single SQLite file with WAL journaling. Two migrations bring it up:
+
+- `001_initial.up.sql` — six application tables.
+- `002_fts.up.sql` — an FTS5 virtual table over `messages.text` plus AFTER INSERT/UPDATE/DELETE triggers that keep it in sync.
+
+The six application tables:
+
+| Table | Purpose | Primary key |
+|---|---|---|
+| `contacts` | One row per JID we've ever seen. `push_name`, `business_name`, `phone`. | `jid` |
+| `groups` | Group metadata (name, topic, owner, created_at). | `jid` |
+| `group_participants` | Membership + admin flag. Composite PK (group_jid, contact_jid). | `(group_jid, contact_jid)` |
+| `chats` | One row per conversation (DM or group). `last_message_at`, `unread_count`, `archived`, `pinned`, `muted_until`. | `jid` |
+| `messages` | The bulk table. Composite PK; nullable `text`; `kind` constrained to one of 10 values; `reactions` is a JSON blob; `raw` holds the original whatsmeow event JSON for forensics. | `(chat_jid, id)` |
+| `media` | Per-message media metadata (mime, size, sha256, dimensions, duration, download_ref, cached `local_path`). | autoincrement `id`, unique `(message_chat_jid, message_id)` |
+
+Indexes that actually matter at query time:
+
+- `messages_chat_ts_idx (chat_jid, timestamp DESC)` — drives `get_messages` paging (newest-first by chat).
+- `messages_sender_ts_idx (sender_jid, timestamp DESC)` — drives `search_messages` when filtered by sender.
+- `messages_ts_idx (timestamp DESC)` — global recency.
+- `chats_last_msg_idx (last_message_at DESC)` — drives `list_chats`.
+- FTS5 `fts_messages` table — drives `search_messages` full-text path.
+
+Timestamps are Unix seconds (`int64`). `from_me` is `0|1`. Nullable `text` distinguishes deleted/tombstoned messages from empty ones (deletion sets `text=NULL` and `deleted_at=<unix>`).
+
+### Ingestion pipeline
+
+`waclient.WhatsmeowClient` translates `whatsmeow.events.*` into a small set of normalized event types in `internal/waevent` — `TestMessage`, `TestMedia`, `TestEdit`, `TestDelete`, `TestReaction`, `TestContact`, `TestGroupInfo`, `TestGroupParticipant`. The "Test" prefix is historical (the types started as test fixtures and were lifted into a shared package to break the `ingest ↔ waclient` import cycle); they are the production event shape.
+
+`ingest.Ingester.Run` is a `select { case <-ctx.Done(): … case ev := <-ch: i.handle(ctx, ev) }` loop. `handle` dispatches by concrete type and calls into `db.Queries`:
+
+| Event | Effect on DB |
+|---|---|
+| `TestMessage` | `UpsertChat` (kind from JID suffix), `UpsertContact` for sender, `InsertMessage` (INSERT OR IGNORE — live ingester wins on duplicate). |
+| `TestMedia` | `UpsertMedia` keyed by `(chat_jid, msg_id)`. |
+| `TestEdit` | `UpdateMessageEdited` — sets new text and `edited_at`. |
+| `TestDelete` | `TombstoneMessage` — sets `text=NULL` and `deleted_at`. |
+| `TestReaction` | Reads the existing reactions JSON, mutates the array, writes back via `UpdateMessageReactions`. |
+| `TestContact` | `UpsertContact` (newer `updated_at` wins). |
+| `TestGroupInfo` | `UpsertGroup`. |
+| `TestGroupParticipant` | `SetGroupParticipants` (full replace in a tx). |
+
+After every event, `markEvent()` stamps `lastEventAt` — the `status` tool reads this to report "ingestion freshness."
+
+### Send and download paths
+
+The four send tools (`send_text`, `send_media`, `react`, `mark_read`) live in `internal/mcp/tools/send.go`. They:
+
+1. Validate arguments (`validateRequired`).
+2. Call into `waclient.Client.SendX(...)`.
+3. Translate the result into the standard `{result, error, retryable}` envelope so the LLM can decide whether to retry.
+
+`download_media` is in `internal/mcp/tools/media.go`. It:
+
+1. Looks up the `media` row by `(chat_jid, message_id)`.
+2. If `local_path` already exists and the file is present, returns the cached path — never re-downloads.
+3. Otherwise calls `waclient.Client.DownloadMedia(ref)`, computes sha256, writes the bytes to `~/.wadb/media/<sha256>.<ext>`, and updates the media row's `local_path`, `size`, `sha256`, `downloaded_at`.
+
+Errors flagged retryable: `not connected`, `rate limited`, `i/o timeout`, network errors. Validation and "no such message" errors are non-retryable.
+
+### Linking flow (`wadb link`)
+
+The pairing handshake is two phases and `wadb link` waits for both. Exiting between them silently drops the pairing — WhatsApp's "Linked Devices" list never shows the device.
+
+```
+  Phone scans QR
+        │
+        ▼
+  qrCh emits "code" (display)  ──► repeat until scanned
+        │
+        ▼
+  qrCh emits "success"  ◄──── QR accepted, local device row written
+        │
+        ▼
+  *events.PairSuccess  ◄────── server confirms identity exchange
+        │
+        ▼
+  reconnect + authenticate
+        │
+        ▼
+  *events.Connected   ◄─────── new authenticated socket up
+        │
+        ▼
+  hold socket open 5s  ◄────── lets initial app-state sync (contacts,
+        │                       chat list) complete before we close
+        ▼
+  Disconnect, exit 0
+```
+
+Two practical consequences baked into `cmd/wadb/link.go`:
+
+- The event handler is registered *before* `GetQRChannel` opens — otherwise `PairSuccess` can race ahead of the listener.
+- `session.db` is opened with `journal_mode=WAL` + `busy_timeout=5000` in `internal/waclient/whatsmeow.go`. During post-pair sync, whatsmeow runs prekey upload, identity-store writes, and history-sync writes in parallel goroutines. Without WAL they serialize and the contention surfaces as `SQLITE_BUSY`, silently failing the handshake.
+
+### Importing history (`wadb import-history`)
+
+The importer is independent of `serve`. Pipeline (in `internal/macimport/macimport.go`):
+
+1. **Open source read-only.** `file:<path>?mode=ro`. Deliberately NOT `immutable=1` — that flag tells SQLite to skip WAL coordination, which causes `database disk image is malformed` when WhatsApp Desktop is running and writing concurrently.
+2. **Pin destination pool to 1 connection.** `db.Queries`' methods all use `q.db.ExecContext`; without `SetMaxOpenConns(1)`, the explicit `BEGIN` lands on connection A while writers fire on B/C/D and the transaction does nothing. The fix is `SetMaxOpenConns(1)` for the duration of the import.
+3. **Five phases in dependency order**, each wrapped in a single `BEGIN`/`COMMIT` so 100K+ inserts pay one fsync instead of one per row:
+
+   | Phase | Source tables | Notes |
+   |---|---|---|
+   | Contacts | `ZWAMESSAGE.ZFROMJID`, `ZWACHATSESSION.ZCONTACTJID`, `ZWAGROUPMEMBER.ZMEMBERJID` (UNION DISTINCT) | Push names pre-built into a JID→name map in two scans: `ZWAPROFILEPUSHNAME` (primary) and `ZWACHATSESSION.ZPARTNERNAME` (fallback). `ZWAMESSAGE.ZPUSHNAME` is **not** used — on this schema version it holds serialized protobuf identity hints, not human names. |
+   | Chats | `ZWACHATSESSION` | `ZSESSIONTYPE = 1` → group, else DM. |
+   | Groups + participants | `ZWAGROUPINFO` joined to `ZWACHATSESSION`, then per-group `ZWAGROUPMEMBER` | This phase runs **without** an outer transaction because `db.Queries.SetGroupParticipants` opens its own delete-then-insert tx and SQLite rejects nested `BEGIN`s. |
+   | Messages | Per-chat paged `SELECT … FROM ZWAMESSAGE LIMIT 5000 OFFSET N` | Uses `InsertMessageFillNulls` (not `InsertMessage`) so a prior failed import's `NULL text` rows get back-filled via `COALESCE` instead of being silently skipped by `INSERT OR IGNORE`. Per-row `UpsertContact` writes the sender with `updated_at=1` so it loses any "newer wins" race against the contacts-phase upserts. |
+   | Media | `ZWAMEDIAITEM` joined to `ZWAMESSAGE` and `ZWACHATSESSION` | Metadata only — historical attachments don't carry a download reference whatsmeow can resolve, so `download_media` on historical rows can't fetch bytes (tracked as a follow-up). |
+
+4. **Timestamp conversion.** Core Data stores seconds since `2001-01-01 UTC`. `coreDataToUnix(t)` adds 978307200.
+
+Re-running the importer is safe. The schema's primary keys and `ON CONFLICT … DO UPDATE` clauses make every write idempotent.
+
+### Name resolution and the `@lid` quirk
+
+WhatsApp identifies entities with JIDs in several namespaces:
+
+- `<phone>@s.whatsapp.net` — standard contacts.
+- `<groupid>@g.us` — groups.
+- `<id>@broadcast` — broadcast/status lists.
+- `<id>@lid` — Linked Identity (privacy-preserving handles for users who've enabled the new identity system).
+
+For `@lid` specifically there are two shapes:
+
+- **Base form:** `236592602042491@lid`
+- **Device form:** `236592602042491:64@lid` — per-sending-device suffix
+
+Only the base form appears in `ZWAPROFILEPUSHNAME` (which is what populates `contacts.push_name` during import). But messages cite the device form as `sender_jid`. A naive `GetContact(sender_jid)` lookup misses every `@lid` sender that has a real push name.
+
+`internal/mcp/tools/messages.go::lookupContactName` handles this by trying both forms:
+
+```
+lookupContactName(jid)
+  → GetContact(jid)                       # try as-is
+  → GetContact(stripDeviceSuffix(jid))    # try base form (":NN" removed)
+  → ""                                    # neither hit
+```
+
+Push names go through `cleanPushName` (in `discovery.go`) as a defense-in-depth filter: strings that are 12+ chars and contain only base64-alphabet characters are dropped (treated as serialized protobuf identity hints rather than human names). Real names — `"Alice"`, `"Bob Barker"`, `"+65 9298 0156"` — pass through unchanged.
+
+The same enrichment runs in two places:
+
+- `chatDisplayName(jid, kind)` in `discovery.go` enriches `list_chats` and `get_chat` with a `name` field (group name for groups, contact push name for DMs).
+- `messageToMap(ctx, q, m)` in `messages.go` adds `sender_name` to every message row (`"You"` for `from_me`, otherwise resolved via `lookupContactName`).
+
+### On-disk layout
+
+```
+~/.wadb/                            (mode 0700)
+  session.db                        whatsmeow's session + identity + prekeys (WAL)
+  session.db-wal                    WAL journal
+  session.db-shm                    shared-memory index
+  wadb.db                           application DB (WAL + FTS5)
+  wadb.db-wal
+  wadb.db-shm
+  media/                            (mode 0700)
+    <sha256>.<ext>                  downloaded blobs, content-addressed
+```
+
+Files are created at `0600`, directories at `0700`. There are no other state files; deleting `~/.wadb/` and re-running `wadb link` is a complete reset.
 
 ### Repository layout
 
 ```
-cmd/wadb/                   # main; subcommands link, serve
+cmd/wadb/                   # main; subcommands link, serve, import-history
+  main.go                   # subcommand dispatch
+  link.go                   # QR + two-phase handshake wait
+  serve.go                  # MCP server + ingester wiring
+  import.go                 # import-history CLI
+
 internal/
   config/                   # WADB_HOME resolution, paths, log level
   db/                       # SQLite open + WAL, embedded migrations, typed Queries
-    migrations/             # forward-only versioned SQL
-  waclient/                 # WhatsApp Client interface, whatsmeow wrapper, test Fake
+    migrations/             # forward-only versioned SQL (001_initial, 002_fts)
+  waclient/                 # WhatsApp Client interface, whatsmeow wrapper, slog adapter, test Fake
   waevent/                  # normalized event types (shared by ingest and waclient)
-  ingest/                   # event -> DB writer (single goroutine)
+  ingest/                   # event → DB writer (single goroutine, sole writer)
+  macimport/                # macOS WhatsApp Desktop → wadb.db importer
   mcp/                      # MCP server wiring + e2e test
     cursor/                 # opaque (ts, id) pagination cursors
     tools/                  # one file per tool group: status / discovery / messages / send / media
   media/                    # sha256-keyed download cache
-docs/superpowers/
-  specs/                    # design spec
-  plans/                    # implementation plan
 ```
 
 ## Known limitations
