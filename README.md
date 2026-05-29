@@ -4,9 +4,6 @@
 
 Single Go binary. No background server. No cloud. Your data stays on disk under `~/.wadb/`.
 
-## Status
-
-v1. Hermetic test suite (42 tests) passes. The link / send / receive / search / download paths work against real WhatsApp. See [Known limitations](#known-limitations) for what's deferred.
 
 ## Install
 
@@ -48,6 +45,44 @@ For Claude Code:
 ```bash
 claude mcp add wadb /absolute/path/to/wadb serve
 ```
+
+For [OpenClaw](https://openclaw.ai) (register `wadb` in the Gateway's MCP registry so any OpenClaw runtime can consume it):
+
+```bash
+openclaw mcp set wadb '{"command":"/absolute/path/to/wadb","args":["serve"]}'
+```
+
+Verify with `openclaw mcp list` (should show `wadb`) and `openclaw mcp show wadb --json`. To remove later: `openclaw mcp unset wadb`.
+
+For [NanoClaw v2](https://github.com/qwibitai/nanoclaw), add `wadb` to a group's `container.json` and mount `~/.wadb` so the container can see your session and database:
+
+```jsonc
+{
+  "mcpServers": {
+    "wadb": {
+      "command": "/workspace/extra/wadb/wadb",
+      "args": ["serve"],
+      "env": {
+        "WADB_HOME": "/workspace/extra/.wadb"
+      }
+    }
+  },
+  "additionalMounts": [
+    {
+      "hostPath": "/Users/<you>/.wadb",
+      "containerPath": ".wadb",
+      "readonly": false
+    },
+    {
+      "hostPath": "/absolute/path/to/wadb-binary-dir",
+      "containerPath": "wadb",
+      "readonly": true
+    }
+  ]
+}
+```
+
+Substitute `<you>` with `$HOME`'s basename. The container mounts `~/.wadb` read-write (the binary needs to write `wadb.db` and `media/`) and the binary directory read-only. Confirm both paths are under an `allowedRoots` entry in `~/.config/nanoclaw/mount-allowlist.json` first — run `/manage-mounts` if not. After editing, rebuild with `pnpm run build` and restart NanoClaw. The agent will see tools as `mcp__wadb__*`; add `'mcp__wadb__*'` to `TOOL_ALLOWLIST` in `container/agent-runner/src/providers/claude.ts` if your provider config gates them.
 
 Restart your MCP client. Claude can now see your WhatsApp.
 
