@@ -32,7 +32,16 @@ func NewWhatsmeow(ctx context.Context, sessionDBPath string) (*WhatsmeowClient, 
 	dbLog := newSlogAdapter("whatsmeow/db")
 	// modernc.org/sqlite registers itself as "sqlite". dbutil.ParseDialect
 	// accepts any string starting with "sqlite" as the SQLite dialect.
-	dsn := "file:" + sessionDBPath + "?_pragma=foreign_keys(1)"
+	//
+	// WAL + busy_timeout are load-bearing: during post-pair sync whatsmeow
+	// runs prekey upload, identity-store writes, and history-sync writes
+	// in parallel goroutines. Without WAL they serialize through a single
+	// writer lock; without busy_timeout, contention surfaces as
+	// SQLITE_BUSY and silently fails the pairing handshake.
+	dsn := "file:" + sessionDBPath +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=foreign_keys(1)" +
+		"&_pragma=busy_timeout(5000)"
 	container, err := sqlstore.New(ctx, "sqlite", dsn, dbLog)
 	if err != nil {
 		return nil, fmt.Errorf("sqlstore: %w", err)
