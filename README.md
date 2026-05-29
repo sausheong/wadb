@@ -1,6 +1,6 @@
 # wadb
 
-`wadb` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an LLM like Claude on-demand access to your WhatsApp account. It links once as a Web "linked device" via [whatsmeow](https://github.com/tulir/whatsmeow), mirrors messages, contacts, and groups into a local SQLite database as they arrive, and exposes that data — plus send / react / download capabilities — through 13 stdio MCP tools.
+`wadb` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI assistant or agent (like Claude Desktop or OpenClaw) on-demand access to your WhatsApp account. It links once as a Web "linked device" via [whatsmeow](https://github.com/tulir/whatsmeow), mirrors messages, contacts, and groups into a local SQLite database as they arrive, and exposes that data — plus send / react / download capabilities — through 13 stdio MCP tools.
 
 Single Go binary. No background server. No cloud. Your data stays on disk under `~/.wadb/`.
 
