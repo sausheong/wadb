@@ -7,6 +7,41 @@ Single Go binary. No background server. No cloud. Your data stays on disk under 
 
 ## Install
 
+### Pre-built binary (recommended)
+
+Grab a static binary for your platform from the [latest release](https://github.com/sausheong/wadb/releases/latest):
+
+| Platform | File |
+|---|---|
+| macOS, Apple Silicon | `wadb-<version>-darwin-arm64` |
+| macOS, Intel | `wadb-<version>-darwin-amd64` |
+| Linux, x86_64 | `wadb-<version>-linux-amd64` |
+| Linux, ARM64 | `wadb-<version>-linux-arm64` |
+| Windows, x86_64 | `wadb-<version>-windows-amd64.exe` |
+| Windows, ARM64 | `wadb-<version>-windows-arm64.exe` |
+
+Each binary is ~18 MB, fully static (`CGO_ENABLED=0`), with no runtime dependencies. `SHA256SUMS` is published with every release — verify before running:
+
+```bash
+shasum -a 256 -c SHA256SUMS   # macOS / Linux
+# or, on Windows:
+Get-FileHash wadb-<version>-windows-amd64.exe -Algorithm SHA256
+```
+
+Install (macOS / Linux):
+
+```bash
+chmod +x wadb-<version>-darwin-arm64
+# macOS only: clear the Gatekeeper quarantine flag if the binary was downloaded via a browser
+xattr -d com.apple.quarantine wadb-<version>-darwin-arm64 2>/dev/null || true
+sudo mv wadb-<version>-darwin-arm64 /usr/local/bin/wadb
+wadb link
+```
+
+On Windows, drop the `.exe` somewhere on `PATH` and call it from PowerShell or cmd.
+
+### Build from source
+
 Requires Go 1.25+.
 
 ```bash
@@ -15,7 +50,7 @@ cd wadb
 go build -o wadb ./cmd/wadb
 ```
 
-The binary is fully self-contained — `modernc.org/sqlite` is pure Go, no CGO toolchain required.
+The binary is fully self-contained — `modernc.org/sqlite` is pure Go, no CGO toolchain required. `make build` works too.
 
 ## Quick start
 
@@ -25,7 +60,7 @@ The binary is fully self-contained — `modernc.org/sqlite` is pure Go, no CGO t
 ./wadb link
 ```
 
-A QR code prints on stderr. Scan it. The command exits as soon as pairing completes. The session is persisted under `~/.wadb/session.db` — you only do this once.
+A QR code prints on your screen. Scan it. The command exits as soon as pairing completes. The session is persisted under `~/.wadb/session.db` — you only do this once.
 
 **2. Wire it into your MCP client.** For Claude Desktop, add this to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
@@ -84,9 +119,9 @@ For [NanoClaw v2](https://github.com/qwibitai/nanoclaw), add `wadb` to a group's
 
 Substitute `<you>` with `$HOME`'s basename. The container mounts `~/.wadb` read-write (the binary needs to write `wadb.db` and `media/`) and the binary directory read-only. Confirm both paths are under an `allowedRoots` entry in `~/.config/nanoclaw/mount-allowlist.json` first — run `/manage-mounts` if not. After editing, rebuild with `pnpm run build` and restart NanoClaw. The agent will see tools as `mcp__wadb__*`; add `'mcp__wadb__*'` to `TOOL_ALLOWLIST` in `container/agent-runner/src/providers/claude.ts` if your provider config gates them.
 
-Restart your MCP client. Claude can now see your WhatsApp.
+Restart your MCP client. Claude Desktop/Claude Code/OpenClaw/NanoClaw v2 can now see your WhatsApp.
 
-**3. Try it.** Ask Claude something like *"What are my last 10 WhatsApp chats?"* or *"Search my messages for anything mentioning 'flight booking' this month."*
+**3. Try it.** Ask Claude Desktop/Claude Code/OpenClaw/NanoClaw v2 something like *"What are my last 10 WhatsApp chats?"* or *"Search my messages for anything mentioning 'flight booking' this month."*
 
 ## Import history (macOS only)
 
