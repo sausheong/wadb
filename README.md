@@ -88,18 +88,20 @@ Caveats:
 | Tool | Purpose |
 |---|---|
 | `status` | Connection state, linked device, ingestion freshness, DB row counts. |
-| `list_chats` | Recent chats, newest activity first. Optional `kind` filter (`dm` \| `group`). Paginated. |
+| `list_chats` | Recent chats, newest activity first. Optional `kind` filter (`dm` \| `group`). Paginated. Each chat carries a `name` field (group name for groups, contact push name for DMs). |
 | `list_contacts` | Substring search across push name, business name, phone. |
 | `list_groups` | Substring search over groups you're in. |
-| `get_chat` | Full chat detail. For groups, includes participants and admin flags. |
+| `get_chat` | Full chat detail. For groups, includes participants with their resolved `name` and admin flags. |
 
 ### Messages
 
 | Tool | Purpose |
 |---|---|
-| `get_messages` | Page through a chat, newest first. Cursor-based pagination. |
-| `search_messages` | FTS5 full-text search across all message text and media captions. Optional `chat_jid`, `sender_jid`, `since`, `until` filters. |
+| `get_messages` | Page through a chat, newest first. Cursor-based pagination. Each message carries `sender_jid` and a resolved `sender_name` (`"You"` when `from_me` is true). |
+| `search_messages` | FTS5 full-text search across all message text and media captions. Optional `chat_jid`, `sender_jid`, `since`, `until` filters. Returns the same `sender_name`-enriched rows. |
 | `get_message` | One message with reactions, quoted message (one level), and media metadata expanded. |
+
+`sender_name` is resolved best-effort from the contacts table. WhatsApp's `@lid` (Linked Identity) JIDs come in two shapes — `XYZ@lid` (base) and `XYZ:N@lid` (per-device, used by senders) — and the resolver strips the `:N` device suffix before lookup so device-form senders match the base-form profile names stored by `import-history`. A sender with no profile name in either form returns `sender_name: ""`.
 
 ### Media
 
